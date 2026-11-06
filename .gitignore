@@ -16,6 +16,9 @@ wheels/
 # Data files
 *.csv
 
+# Folder
+charts
+
 # files
 ollama.txt
 query.txt
