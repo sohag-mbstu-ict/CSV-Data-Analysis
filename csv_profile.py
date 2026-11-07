@@ -1,6 +1,5 @@
 """CSV inspection and dataset profile generation."""
 import re
-import sys
 
 import pandas as pd
 
@@ -26,7 +25,7 @@ def build_profile(csv_path):
     """Describe the dataset without sending raw rows to the language model."""
     df = pd.read_csv(csv_path, low_memory=False)
     if df.empty:
-        sys.exit("The CSV file has no data rows.")
+        raise ValueError("The CSV file has no data rows.")
 
     duplicates = int(df.duplicated().sum())
     lines = [

@@ -2,6 +2,7 @@
 
 import re
 import time
+import uuid
 from pathlib import Path
 
 import pandas as pd
@@ -87,8 +88,8 @@ def _metric_color(column, index):
     return PALETTE[index % len(PALETTE)]
 
 
-def save_bar_chart(df, question):
-    """Render a clean horizontal bar chart from query results and save it under charts/."""
+def save_bar_chart(df, question, output_dir=None):
+    """Render a clean horizontal bar chart from query results and save it under output_dir (default ./charts)."""
     if df.empty:
         return None, "The query returned no rows to chart."
 
@@ -225,10 +226,10 @@ def save_bar_chart(df, question):
     footer = "  ·  ".join(["Source: query results"] + notes)
     fig.text(0.01, -0.02, footer, fontsize=8, color=MUTED, ha="left", va="top")
 
-    chart_dir = Path.cwd() / "charts"
+    chart_dir = Path(output_dir) if output_dir else Path.cwd() / "charts"
     chart_dir.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r"[^a-z0-9]+", "_", question.lower()).strip("_")[:48] or "bar_chart"
-    chart_path = chart_dir / f"{slug}_{time.strftime('%Y%m%d_%H%M%S')}.png"
+    chart_path = chart_dir / f"{slug}_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.png"
     fig.savefig(chart_path, dpi=200, facecolor="white", bbox_inches="tight", pad_inches=0.25)
     plt.close(fig)
     return chart_path, None

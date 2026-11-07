@@ -1,0 +1,63 @@
+{% load static %}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CSV Analyst</title>
+  <link rel="stylesheet" href="{% static 'data_analysis/app.css' %}">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" aria-label="Datasets">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </span>
+        <span>CSV Analyst</span>
+      </div>
+
+      <label class="dropzone" id="dropzone" for="file-input">
+        <input type="file" id="file-input" accept=".csv,text/csv" hidden>
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M12 16V4m0 0-4 4m4-4 4 4M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="dropzone-title">Upload a CSV</span>
+        <span class="dropzone-hint">Drop a file here or click to browse</span>
+      </label>
+      <p class="upload-status" id="upload-status" role="status" aria-live="polite"></p>
+
+      <h2 class="sidebar-heading">Datasets</h2>
+      <ul class="dataset-list" id="dataset-list"></ul>
+      <p class="empty-hint" id="dataset-empty">No datasets yet.</p>
+    </aside>
+
+    <main class="chat" aria-label="Chat">
+      <header class="chat-header" id="chat-header" hidden>
+        <div class="chat-title">
+          <h1 id="dataset-name"></h1>
+          <p id="dataset-meta"></p>
+        </div>
+        <details class="columns-menu">
+          <summary>Columns</summary>
+          <ul id="column-list"></ul>
+        </details>
+      </header>
+
+      <section class="messages" id="messages" aria-live="polite">
+        <div class="welcome" id="welcome">
+          <h1>Ask questions about your data</h1>
+          <p>Upload a CSV, then ask in plain English. A local model writes the SQL, DuckDB runs it, and every number in the answer is checked against the result.</p>
+        </div>
+      </section>
+
+      <div class="suggestions" id="suggestions"></div>
+
+      <form class="composer" id="composer" autocomplete="off">
+        <textarea id="question" rows="1" maxlength="1000" placeholder="Upload a CSV to start…" disabled aria-label="Your question"></textarea>
+        <button type="submit" id="send" disabled aria-label="Send">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </form>
+    </main>
+  </div>
+  <script src="{% static 'data_analysis/app.js' %}"></script>
+</body>
+</html>

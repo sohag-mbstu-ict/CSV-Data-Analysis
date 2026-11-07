@@ -61,6 +61,12 @@ class Engine:
             for row in self.con.execute("DESCRIBE data").fetchall()
         }
 
+    def row_count(self, table="data"):
+        """Return the number of rows in `data` (deduplicated) or `data_raw`."""
+        if table not in ("data", "data_raw"):
+            raise ValueError("Unknown table")
+        return self.con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
     def share_summary(self, category_column, category_value, measure_column):
         """Compute category and full-dataset totals for a share, including missing categories."""
         column_types = self.column_types()

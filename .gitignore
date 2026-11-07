@@ -34,3 +34,11 @@ Thumbs.db
 .mypy_cache/
 .ruff_cache/
 .ipynb_checkpoints/
+
+# Django local state
+db.sqlite3*
+media/
+staticfiles/
+
+# Generated charts (CLI)
+charts/

@@ -2,7 +2,6 @@
 
 import json
 import re
-import sys
 
 import requests
 
@@ -45,6 +44,10 @@ SQL_RULES = """Rules:
 - List every choice the user did not specify in assumptions."""
 
 
+class LLMError(RuntimeError):
+    """The language model server could not be reached or returned an error."""
+
+
 class LLM:
     """Small Ollama chat client with token and throughput statistics."""
 
@@ -81,10 +84,12 @@ class LLM:
             payload["format"] = json_schema
         try:
             response = requests.post(OLLAMA_URL, json=payload, timeout=300)
-        except requests.ConnectionError:
-            sys.exit("Cannot reach Ollama. Start it with: ollama serve")
+        except requests.ConnectionError as exc:
+            raise LLMError("Cannot reach Ollama. Start it with: ollama serve") from exc
+        except requests.Timeout as exc:
+            raise LLMError("Ollama did not respond within 300 seconds.") from exc
         if response.status_code != 200:
-            sys.exit(f"Ollama error {response.status_code}: {response.text[:300]}")
+            raise LLMError(f"Ollama error {response.status_code}: {response.text[:300]}")
 
         data = response.json()
         stats = self.stats
