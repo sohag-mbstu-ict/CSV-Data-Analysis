@@ -6,6 +6,8 @@ from .models import Dataset, Message
 
 # Most to least preferred measure for the starter questions.
 MEASURE_HINTS = ["revenue", "sales", "amount", "profit", "income", "total", "value", "price", "cost"]
+# "id", "order_id", "order id" (any case) or camelCase "orderId"; not "amount_paid".
+ID_COLUMN = re.compile(r"(?i:(^|[_\s])id)$|[a-z]Id$")
 
 
 class DatasetSerializer(serializers.ModelSerializer):
@@ -23,7 +25,8 @@ class DatasetSerializer(serializers.ModelSerializer):
         """A few starter questions based on the dataset's columns."""
         numeric = [
             column["name"] for column in dataset.columns
-            if column["kind"] == "number" and not column["name"].lower().endswith("id")
+            # Skip id columns ("id", "order_id") but keep names like "amount_paid".
+            if column["kind"] == "number" and not ID_COLUMN.search(column["name"])
         ]
         # Prefer a money-like measure (revenue, sales, ...) over e.g. an age column.
         preferred = [

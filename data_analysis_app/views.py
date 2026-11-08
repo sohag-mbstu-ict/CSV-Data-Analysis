@@ -10,10 +10,11 @@ from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
-from analysis import analyze
-from csv_profile import build_profile
-from llm_client import DEFAULT_MODEL, LLM, LLMError
-from query_engine import Engine
+from utils.analysis import analyze
+from utils.csv_profile import build_profile
+from utils.llm_client import DEFAULT_MODEL, LLM, LLMError
+from utils.query_engine import Engine
+from utils.report import format_result
 
 from . import engines
 from .models import Dataset, Message
@@ -91,7 +92,8 @@ class DatasetViewSet(
         if not upload.name.lower().endswith(".csv"):
             return Response({"detail": "Only .csv files are supported."}, status=status.HTTP_400_BAD_REQUEST)
         if upload.size > settings.CSV_MAX_UPLOAD_BYTES:
-            limit_mb = settings.CSV_MAX_UPLOAD_BYTES // (1024 * 1024)
+            limit_mb = settings.CSV_MAX_UPLOAD_BYTES // (1024 * 1024) #50 MB
+            
             return Response({"detail": f"The file is larger than {limit_mb} MB."}, status=status.HTTP_400_BAD_REQUEST)
         if upload.size == 0:
             return Response({"detail": "The file is empty."}, status=status.HTTP_400_BAD_REQUEST)
@@ -99,22 +101,27 @@ class DatasetViewSet(
         dataset = Dataset(name=Path(upload.name).name[:255], size_bytes=upload.size)
         dataset.file.save(upload.name, upload, save=False)
         path = dataset.file.path
+        engine = None
         try:
             profile_text, missing, duplicates = build_profile(path)
             engine = Engine(path)
+            dataset.profile_text = profile_text
+            dataset.missing = missing
+            dataset.duplicates = duplicates
+            # Normal analysis uses the de-duplicated table; keep the UI row count consistent.
+            dataset.row_count = engine.row_count("data")
+            dataset.columns = describe_columns(engine)
+            dataset.save()
+            engines.put(dataset.id, engine)
         except Exception as exc:
+            if engine is not None:
+                engine.close()
             dataset.file.delete(save=False)
+            if dataset.pk:
+                dataset.delete()
             logger.info("Rejected CSV upload %s: %s", upload.name, exc)
             message = str(exc).split("\n")[0][:300]
             return Response({"detail": f"Could not read this CSV: {message}"}, status=status.HTTP_400_BAD_REQUEST)
-
-        dataset.profile_text = profile_text
-        dataset.missing = missing
-        dataset.duplicates = duplicates
-        dataset.row_count = engine.row_count("data_raw")
-        dataset.columns = describe_columns(engine)
-        dataset.save()
-        engines.put(dataset.id, engine)
         return Response(self.get_serializer(dataset).data, status=status.HTTP_201_CREATED)
 
     def perform_destroy(self, dataset):
@@ -122,7 +129,12 @@ class DatasetViewSet(
         for message in dataset.messages.all():
             chart = (message.payload or {}).get("chart_path")
             if chart:
-                Path(chart).unlink(missing_ok=True)
+                chart_path = Path(chart).resolve()
+                chart_root = Path(settings.CHART_ROOT).resolve()
+                if chart_root in chart_path.parents:
+                    chart_path.unlink(missing_ok=True)
+                else:
+                    logger.warning("Refusing to delete chart outside chart directory: %s", chart_path)
         dataset.file.delete(save=False)
         dataset.delete()
 
@@ -142,12 +154,12 @@ class DatasetViewSet(
         llm = LLM(settings.OLLAMA_MODEL or DEFAULT_MODEL)
         response_status = status.HTTP_201_CREATED
         try:
-            entry = engines.get(dataset)
-            with entry.lock:
+            with engines.using(dataset) as engine:
                 result = analyze(
-                    question, llm, entry.engine,
+                    question, llm, engine,
                     dataset.profile_text, dataset.missing, dataset.duplicates,
                     chart_dir=settings.CHART_ROOT,
+                    on_status=lambda message: logger.info("  (%s)", message),
                 )
             result["chart_url"] = chart_url(result["chart_path"])
             content = result["answer"]
@@ -160,6 +172,12 @@ class DatasetViewSet(
             result = {"kind": "error", "answer": "Something went wrong while answering. See the server log."}
             content = result["answer"]
             response_status = status.HTTP_500_INTERNAL_SERVER_ERROR
+
+        # Print the same report the command-line tool shows to the runserver terminal.
+        logger.info(
+            "\n%s\nDATASET: %s | QUESTION: %s\n\n%s\n%s",
+            "=" * 70, dataset.name, question, format_result(result), "=" * 70,
+        )
 
         with transaction.atomic():
             assistant_message = Message.objects.create(

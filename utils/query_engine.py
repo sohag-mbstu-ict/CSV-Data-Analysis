@@ -2,6 +2,7 @@
 
 import re
 import threading
+from decimal import Decimal
 
 import duckdb
 import pandas as pd
@@ -52,7 +53,14 @@ class Engine:
         finally:
             timer.cancel()
             cursor.close()
-        return pd.DataFrame(rows[:MAX_ROWS], columns=columns), len(rows) > MAX_ROWS
+        frame = pd.DataFrame(rows[:MAX_ROWS], columns=columns)
+        # DuckDB DECIMAL values arrive as Python Decimal objects, which pandas stores as
+        # non-numeric "object" columns; charts and number checks need real floats.
+        for column in frame.columns:
+            values = frame[column].dropna()
+            if len(values) and frame[column].dtype == object and all(isinstance(v, Decimal) for v in values):
+                frame[column] = frame[column].astype(float)
+        return frame, len(rows) > MAX_ROWS
 
     def column_types(self):
         """Return the loaded table's column names and DuckDB type names."""
@@ -62,10 +70,10 @@ class Engine:
         }
 
     def row_count(self, table="data"):
-        """Return the number of rows in `data` (deduplicated) or `data_raw`."""
-        if table not in ("data", "data_raw"):
-            raise ValueError("Unknown table")
-        return self.con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        """Return the row count for a known in-memory table."""
+        if table not in {"data", "data_raw"}:
+            raise ValueError("Only the loaded data and data_raw tables are available")
+        return self.con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
 
     def share_summary(self, category_column, category_value, measure_column):
         """Compute category and full-dataset totals for a share, including missing categories."""

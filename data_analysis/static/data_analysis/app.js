@@ -135,7 +135,15 @@
     updateSendState();
 
     els.messages.replaceChildren();
-    const history = await api(`datasets/${id}/messages/`);
+    let history;
+    try {
+      history = await api(`datasets/${id}/messages/`);
+    } catch (error) {
+      if (state.current && state.current.id === id) {
+        els.messages.append(renderAssistant({ kind: "error", answer: `Could not load the chat history: ${error.message}` }));
+      }
+      return;
+    }
     if (!state.current || state.current.id !== id) return;
     if (history.length === 0) {
       const intro = el("div", "welcome");
@@ -270,6 +278,17 @@
     if (labels[kind]) bubble.append(el("span", "label", labels[kind]));
 
     bubble.append(el("p", "answer", payload.answer || content));
+
+    if (payload.suggestions && payload.suggestions.length) {
+      const chips = el("div", "inline-suggestions");
+      for (const text of payload.suggestions) {
+        const chip = el("button", null, text);
+        chip.type = "button";
+        chip.addEventListener("click", () => ask(text));
+        chips.append(chip);
+      }
+      bubble.append(chips);
+    }
 
     if (payload.profile) bubble.append(el("pre", "profile", payload.profile));
 

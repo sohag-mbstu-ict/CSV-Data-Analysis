@@ -13,11 +13,11 @@ import time
 import numpy as np
 import pandas as pd
 
-from csv_profile import is_dataset_description_request
-from llm_client import question_to_sql
-from query_engine import check_sql
-from result_grounding import write_answer
-from visualization import save_bar_chart, wants_bar_chart
+from utils.csv_profile import is_dataset_description_request
+from utils.llm_client import question_to_sql
+from utils.query_engine import check_sql
+from utils.result_grounding import write_answer
+from utils.visualization import save_bar_chart, wants_bar_chart
 
 MAX_REPAIRS = 2
 SHARE_REQUEST = re.compile(
@@ -30,6 +30,26 @@ CHURN_WHY_REQUEST = re.compile(
     r"\b(reason|cause|factor|driver)s?\b.*\b(churn|churned|churning)\b",
     re.I,
 )
+# Whole messages that are greetings, thanks or "what can you do" rather than data questions.
+SMALL_TALK = re.compile(
+    r"^\s*(?:"
+    r"h+i+|hello+|hey+|hiya|yo|howdy|greetings|good\s+(?:morning|afternoon|evening|day)|"
+    r"(?:as+alamu\s*alaikum|salam|salaam)|"
+    r"thanks?(?:\s+you)?(?:\s+(?:so\s+much|a\s+lot))?|thx|ty|"
+    r"bye|goodbye|see\s+you|ok(?:ay)?|cool|nice|great|"
+    r"help|what\s+can\s+you\s+do|how\s+does\s+(?:this|it)\s+work|who\s+are\s+you|"
+    r"how\s+are\s+you(?:\s+doing)?"
+    r")(?:\s+(?:there|all|everyone|again|claude|bot))?\s*[!.?,:)\s]*$",
+    re.I,
+)
+NO_QUERY = "no query was produced"
+NUMERIC_TYPE_PREFIXES = (
+    "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT",
+    "UINTEGER", "UBIGINT", "DECIMAL", "DOUBLE", "FLOAT", "REAL",
+)
+ID_COLUMN = re.compile(r"(?i:(^|[_\s])id)$|[a-z]Id$")
+MEASURE_HINTS = ["revenue", "sales", "amount", "profit", "income", "total", "value", "price", "cost"]
+
 # The built-in churn report only works on datasets that have these columns.
 CHURN_COLUMNS = {
     "customer_id", "churned", "customer_segment", "customer_age",
@@ -167,6 +187,7 @@ def _empty_result(question, kind):
         "chart_error": None,
         "elapsed_s": 0.0,
         "llm_report": None,
+        "suggestions": [],        # example questions the user can click (chat / clarify)
     }
 
 
@@ -195,6 +216,96 @@ def _churn_report(question, engine):
     return result
 
 
+def _example_questions(engine):
+    """Build a few example questions from the dataset's real column names."""
+    types = engine.column_types()
+    numeric = [
+        name for name, type_name in types.items()
+        if type_name.upper().startswith(NUMERIC_TYPE_PREFIXES) and not ID_COLUMN.search(name)
+    ]
+    measure = next(
+        (name for hint in MEASURE_HINTS for name in numeric if hint in name.lower()),
+        numeric[0] if numeric else None,
+    )
+    text_columns = [
+        name for name, type_name in types.items()
+        if type_name.upper() == "VARCHAR" and not ID_COLUMN.search(name)
+    ]
+    categories = []
+    if text_columns:
+        expressions = ", ".join(
+            'approx_count_distinct("' + name.replace('"', '""') + '")' for name in text_columns
+        )
+        counts = engine.con.execute(f"SELECT {expressions} FROM data").fetchone()
+        distinct = {name: count for name, count in zip(text_columns, counts) if 1 < count <= 30}
+        categories = list(distinct)
+
+    second_measure = next(
+        (name for hint in MEASURE_HINTS for name in numeric if hint in name.lower() and name != measure),
+        None,
+    )
+    has_dates = any(type_name.upper().startswith(("DATE", "TIMESTAMP")) for type_name in types.values())
+
+    # One example per kind of analysis: overview, breakdown, ranking, trend, comparison, data quality.
+    examples = ["Give me an overview of this dataset"]
+    if measure and categories:
+        examples.append(f"Show total {measure} by {categories[0]} in a bar chart")
+        # A "top 5" only makes sense for a column with more than 5 different values.
+        ranked = max(categories, key=lambda name: distinct[name])
+        if distinct[ranked] > 5:
+            examples.append(f"What are the top 5 {ranked} by total {measure}?")
+        else:
+            examples.append(f"Which {ranked} has the highest total {measure}?")
+    elif measure:
+        examples.append(f"What are the average, minimum and maximum {measure}?")
+    if measure and has_dates:
+        examples.append(f"How did total {measure} change month by month?")
+    if measure and second_measure and categories:
+        examples.append(f"Compare total {measure} and {second_measure} by {categories[-1]}")
+    examples.append("Which columns have missing values?")
+    return examples
+
+
+def _small_talk_reply(question, engine):
+    """Answer greetings, thanks and "what can you do" without calling the model."""
+    result = _empty_result(question, "chat")
+    text = question.lower()
+    if re.search(r"\b(thanks|thank|thx|ty)\b", text):
+        result["answer"] = (
+            "You're welcome! Happy to dig into the data whenever you're ready. "
+            "Here are a few more things you could explore:"
+        )
+    elif re.search(r"\b(bye|goodbye|see you)\b", text):
+        result["answer"] = (
+            "Goodbye! Your chat history is saved, so you can come back and pick up right where you left off."
+        )
+    elif re.search(r"\b(ok|okay|cool|nice|great)\b", text):
+        result["answer"] = "Great! What would you like to look at next? A few ideas:"
+    else:
+        result["answer"] = (
+            "Hi! I'm your data analysis assistant for this CSV.\n\n"
+            "Ask me anything about the data in plain English: totals, averages, top performers, "
+            "trends over time, or comparisons between groups. I turn your question into a SQL query, "
+            "run it on the full dataset, and double-check every number before I answer.\n\n"
+            'Want a picture? Add "chart" or "plot" to your question and I\'ll draw a bar chart.\n\n'
+            "Here are some questions to get you started:"
+        )
+    result["suggestions"] = _example_questions(engine)
+    return result
+
+
+def _clarify_reply(question, engine):
+    """Reply when the model could not turn the message into a query about the data."""
+    result = _empty_result(question, "clarify")
+    result["answer"] = (
+        "I'm not sure how to answer that from this dataset. I work best with questions about the data "
+        "itself, such as a total, an average, a ranking, a trend over time, or a comparison between groups. "
+        "You could try one of these:"
+    )
+    result["suggestions"] = _example_questions(engine)
+    return result
+
+
 def analyze(question, llm, engine, profile_text, missing, duplicates, chart_dir=None, on_status=None):
     """Answer one question about the loaded CSV and return a JSON-friendly result dict.
 
@@ -206,6 +317,9 @@ def analyze(question, llm, engine, profile_text, missing, duplicates, chart_dir=
         result["elapsed_s"] = round(time.time() - start, 1)
         result["llm_report"] = llm.speed_report() if llm.stats["calls"] else None
         return result
+
+    if SMALL_TALK.match(question):
+        return finish(_small_talk_reply(question, engine))
 
     if is_dataset_description_request(question):
         result = _empty_result(question, "profile")
@@ -230,6 +344,10 @@ def analyze(question, llm, engine, profile_text, missing, duplicates, chart_dir=
     repairs = []
     sql, frame, truncated = plan["sql"], None, False
     error = plan.get("error")
+    if not sql and not error:
+        # Valid reply but no query: the message is not a question about the data
+        # (e.g. "ok then"). Retrying as a "repair" only wastes model calls.
+        return finish(_clarify_reply(question, engine))
     for attempt in range(MAX_REPAIRS + 1):
         if sql:
             try:
@@ -239,7 +357,7 @@ def analyze(question, llm, engine, profile_text, missing, duplicates, chart_dir=
             except Exception as exc:
                 error = str(exc).split("\n")[0]
         else:
-            error = error or "no query was produced"
+            error = error or NO_QUERY
 
         if attempt < MAX_REPAIRS:
             repairs.append(error[:300])
@@ -253,6 +371,10 @@ def analyze(question, llm, engine, profile_text, missing, duplicates, chart_dir=
                 return finish(result)
             sql, error = plan["sql"], plan.get("error")
 
+    if frame is None and error == NO_QUERY:
+        result = _clarify_reply(question, engine)
+        result["repairs"] = repairs
+        return finish(result)
     if frame is None:
         result = _empty_result(question, "failed")
         result["answer"] = f"Could not compute a reliable answer (last error: {error}). No numbers are reported."

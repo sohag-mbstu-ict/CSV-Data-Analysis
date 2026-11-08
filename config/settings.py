@@ -146,6 +146,26 @@ REST_FRAMEWORK = {
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# Show the app's INFO messages (including the per-question analysis report) in the
+# runserver terminal. Set ANALYSIS_LOG_LEVEL=WARNING to hide the reports.
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'plain': {'format': '%(message)s'},
+    },
+    'handlers': {
+        'console': {'class': 'logging.StreamHandler', 'formatter': 'plain'},
+    },
+    'loggers': {
+        'data_analysis_app': {
+            'handlers': ['console'],
+            'level': os.environ.get('ANALYSIS_LOG_LEVEL', 'INFO'),
+            'propagate': False,
+        },
+    },
+}
+
 
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
