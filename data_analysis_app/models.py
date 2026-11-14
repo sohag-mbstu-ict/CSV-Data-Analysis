@@ -1,6 +1,5 @@
 from django.db import models
 
-
 class Dataset(models.Model):
     """An uploaded CSV plus the profile the language model sees instead of raw rows."""
 

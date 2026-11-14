@@ -12,7 +12,7 @@ from rest_framework.response import Response
 
 from utils.analysis import analyze
 from utils.csv_profile import build_profile
-from utils.llm_client import DEFAULT_MODEL, LLM, LLMError
+from utils.llm_client import LLMError, make_llm
 from utils.query_engine import Engine
 from utils.report import format_result
 
@@ -64,6 +64,14 @@ def chart_url(chart_path):
     if root not in path.parents:
         return None
     return f"{settings.MEDIA_URL}charts/{path.relative_to(root).as_posix()}"
+
+
+
+def build_llm():
+    """Client for the backend chosen in settings (LLM_BACKEND=ollama or vllm)."""
+    if settings.LLM_BACKEND == "vllm":
+        return make_llm("vllm", settings.VLLM_MODEL, settings.VLLM_URL)
+    return make_llm("ollama", settings.OLLAMA_MODEL)
 
 
 class DatasetViewSet(
@@ -151,7 +159,7 @@ class DatasetViewSet(
         question = serializer.validated_data["question"]
 
         user_message = Message.objects.create(dataset=dataset, role=Message.USER, content=question)
-        llm = LLM(settings.OLLAMA_MODEL or DEFAULT_MODEL)
+        llm = build_llm()
         response_status = status.HTTP_201_CREATED
         try:
             with engines.using(dataset) as engine:

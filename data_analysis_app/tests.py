@@ -185,13 +185,159 @@ class SmallTalkTests(DatasetApiTests):
 			def speed_report(self):
 				return f"{self.stats['calls']} LLM calls"
 
-		engine = Engine(Path(__file__).resolve().parent.parent / "data.csv")
 		llm = NoQueryLLM()
-		try:
-			result = analyze("tell me a joke", llm, engine, "profile", {}, 0)
-		finally:
-			engine.close()
+		# Uses its own small CSV: data.csv is git-ignored, so it is not in a fresh clone.
+		with tempfile.TemporaryDirectory() as folder:
+			csv_path = Path(folder) / "sales.csv"
+			csv_path.write_text("order_id,revenue,region\nA,10,North\nB,20,South\n")
+			engine = Engine(csv_path)
+			try:
+				result = analyze("tell me a joke", llm, engine, "profile", {}, 0)
+			finally:
+				engine.close()
 
 		self.assertEqual(result["kind"], "clarify")
 		self.assertEqual(llm.stats["calls"], 1)  # no pointless "repair" retries
 		self.assertTrue(result["suggestions"])
+
+
+class DanglingCteTests(APITestCase):
+	"""Small models sometimes write a correct WITH block and then stop without a final SELECT."""
+
+	DANGLING = (
+		'WITH monthly_revenue AS (\n'
+		'  SELECT strftime("order_date", \'%Y-%m\') AS "month", SUM("revenue") AS "total_revenue"\n'
+		'  FROM data WHERE "order_date" IS NOT NULL GROUP BY "month" ORDER BY "month"\n'
+		')'
+	)
+
+	def test_detects_and_completes_only_dangling_ctes(self):
+		from utils.query_engine import complete_dangling_cte
+
+		sql, name = complete_dangling_cte(self.DANGLING + ";")
+		self.assertEqual(name, "monthly_revenue")
+		self.assertTrue(sql.endswith("SELECT * FROM monthly_revenue"))
+
+		# The last of several CTEs is the one returned; quoted names keep their quotes.
+		_, name = complete_dangling_cte('WITH a AS (SELECT 1 AS x), "b c" AS (SELECT x FROM a)')
+		self.assertEqual(name, '"b c"')
+
+		# Complete queries and parentheses inside string literals are left alone.
+		for sql in [
+			"WITH a AS (SELECT 1 AS x) SELECT x FROM a",
+			"SELECT (1 + 2) AS x",
+			"WITH a AS (SELECT ')' AS x) SELECT x FROM a",
+			"WITH a AS (SELECT 1 AS x) SELECT * FROM a WHERE x IN (SELECT 1)",
+		]:
+			self.assertEqual(complete_dangling_cte(sql), (sql, None), sql)
+
+	def test_check_sql_explains_an_incomplete_with_block(self):
+		from utils.query_engine import check_sql
+
+		with self.assertRaisesRegex(ValueError, "no final SELECT"):
+			check_sql("WITH a AS (SELECT 1)")
+		check_sql("WITH a AS (SELECT 1 AS x) SELECT x FROM a")
+
+	def test_analyze_completes_a_dangling_cte_without_repairs(self):
+		from utils.analysis import analyze
+
+		dangling = self.DANGLING
+
+		class DanglingLLM:
+			stats = {"calls": 0}
+
+			def chat(self, system, user, json_schema=None, **kwargs):
+				self.stats["calls"] += 1
+				if json_schema:
+					import json
+					return json.dumps({"answerable": True, "reason": "", "assumptions": [], "sql": dangling})
+				return "Revenue was 10 in January and 20 in February."
+
+			def speed_report(self):
+				return f"{self.stats['calls']} LLM calls"
+
+		with tempfile.TemporaryDirectory() as folder:
+			csv_path = Path(folder) / "sales.csv"
+			csv_path.write_text("order_date,revenue\n2024-01-05,10\n2024-02-07,20\n")
+			engine = Engine(csv_path)
+			try:
+				result = analyze("What is the monthly trend of total revenue?", DanglingLLM(), engine, "profile", {}, 0)
+			finally:
+				engine.close()
+
+		self.assertEqual(result["kind"], "answer", result["answer"])
+		self.assertEqual(result["repairs"], [])
+		self.assertEqual(result["table"]["rows"], [["2024-01", 10], ["2024-02", 20]])
+		self.assertTrue(result["sql"].endswith("SELECT * FROM monthly_revenue"))
+		self.assertTrue(any("WITH block" in note for note in result["notes"]))
+
+
+class GroundingTests(APITestCase):
+	def test_years_from_date_columns_are_grounded_but_other_years_are_not(self):
+		import pandas as pd
+
+		from utils.result_grounding import ungrounded
+
+		df = pd.DataFrame({"month": ["2023-01", "2024-12"], "total_revenue": [229512.77, 321166.66]})
+		question = "What is the monthly trend of total revenue?"
+
+		answer = "Revenue went from $229,512.77 in January 2023 to $321,166.66 in December 2024."
+		self.assertEqual(ungrounded(answer, df, question), [])
+		self.assertEqual(ungrounded("Revenue peaked in 2025.", df, question), ["2025"])
+
+
+class BackendTests(APITestCase):
+	"""The vLLM client speaks the OpenAI-compatible API; no server is needed for these tests."""
+
+	def fake_response(self, data):
+		from unittest import mock
+
+		response = mock.Mock(status_code=200)
+		response.json.return_value = data
+		return response
+
+	def test_make_llm_picks_the_backend(self):
+		from utils.llm_client import DEFAULT_MODEL, OllamaLLM, VLLMClient, make_llm
+
+		self.assertIsInstance(make_llm("ollama"), OllamaLLM)
+		self.assertEqual(make_llm("ollama").model, DEFAULT_MODEL)
+		self.assertIsInstance(make_llm("VLLM"), VLLMClient)
+		with self.assertRaises(ValueError):
+			make_llm("openai")
+
+	def test_vllm_client_sends_schema_and_disables_thinking(self):
+		from unittest import mock
+
+		from utils.llm_client import SQL_SCHEMA, VLLMClient
+
+		llm = VLLMClient(url="http://vllm.test/v1/")
+		models = self.fake_response({"data": [{"id": "qwen3.5-4b"}]})
+		models.raise_for_status = mock.Mock()
+		reply = self.fake_response({
+			"choices": [{"message": {"content": '<think>x</think>{"sql": "SELECT 1"}'}}],
+			"usage": {"prompt_tokens": 12, "completion_tokens": 5},
+		})
+		with mock.patch("utils.llm_client.requests.get", return_value=models), \
+				mock.patch("utils.llm_client.requests.post", return_value=reply) as post:
+			text = llm.chat("system", "user", json_schema=SQL_SCHEMA, temperature=0.4)
+
+		url, payload = post.call_args.args[0], post.call_args.kwargs["json"]
+		self.assertEqual(url, "http://vllm.test/v1/chat/completions")
+		self.assertEqual(payload["model"], "qwen3.5-4b")  # discovered from /models
+		self.assertEqual(payload["temperature"], 0.4)
+		self.assertEqual(payload["response_format"]["json_schema"]["schema"], SQL_SCHEMA)
+		self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": False})
+		self.assertEqual(text, '{"sql": "SELECT 1"}')
+		self.assertEqual((llm.stats["calls"], llm.stats["prompt_tokens"], llm.stats["output_tokens"]), (1, 12, 5))
+		self.assertTrue(llm.speed_report().startswith("1 LLM calls via vllm"))
+
+	def test_unreachable_vllm_explains_how_to_start_it(self):
+		from unittest import mock
+
+		import requests
+
+		from utils.llm_client import LLMError, VLLMClient
+
+		with mock.patch("utils.llm_client.requests.post", side_effect=requests.ConnectionError):
+			with self.assertRaisesRegex(LLMError, "vllm serve"):
+				VLLMClient(model="m").chat("system", "user")

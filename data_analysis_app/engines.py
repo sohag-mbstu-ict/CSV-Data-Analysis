@@ -3,9 +3,9 @@
 import threading
 from collections import OrderedDict
 from contextlib import contextmanager
-
 from utils.query_engine import Engine
 
+# engines.py is a small in-memory cache of DuckDB engines. Each engine holds one CSV loaded into DuckDB. Without the cache, every question would reload and de-duplicate the whole CSV, which is slow for large files. The cache keeps up to 4 datasets loaded (MAX_ENGINES = 4) and makes sure only one request uses a given engine at a time
 MAX_ENGINES = 4
 
 
@@ -15,8 +15,7 @@ class _Entry:
         # One question at a time per dataset: DuckDB connections are not shared across threads safely.
         self.lock = threading.Lock()
         self.closed = False
-
-
+        
 _cache = OrderedDict()
 _cache_lock = threading.Lock()
 

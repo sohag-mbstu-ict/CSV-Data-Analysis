@@ -54,6 +54,8 @@ def ungrounded(answer, df, question):
     ]
     for value in df.astype(str).to_numpy().ravel():
         allowed.extend(number for _, number, _ in numbers_in(value))
+        # numbers_in() skips dates, but an answer may name their parts, e.g. "2023-01" -> "January 2023".
+        allowed.extend(float(part) for date in DATE.findall(value) for part in date.split("-"))
     allowed.extend(number for _, number, _ in numbers_in(question))
     allowed.append(len(df))
 

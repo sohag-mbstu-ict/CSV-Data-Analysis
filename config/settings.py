@@ -130,8 +130,18 @@ CHART_ROOT = MEDIA_ROOT / 'charts'
 # Largest CSV accepted by the upload endpoint, in bytes.
 CSV_MAX_UPLOAD_BYTES = int(os.environ.get('CSV_MAX_UPLOAD_MB', '50')) * 1024 * 1024
 
+# Which language model answers questions: 'ollama' (default) or 'vllm'.
+LLM_BACKEND = os.environ.get('LLM_BACKEND', 'ollama').strip().lower()
+if LLM_BACKEND not in ('ollama', 'vllm'):
+    raise ValueError(f"LLM_BACKEND must be 'ollama' or 'vllm', not {LLM_BACKEND!r}")
+
 # Ollama model used by the web app; empty means llm_client.DEFAULT_MODEL.
 OLLAMA_MODEL = os.environ.get('OLLAMA_MODEL', '')
+
+# vLLM server started with `vllm serve` (see README). Empty VLLM_MODEL means: use the
+# model the server reports at /v1/models.
+VLLM_URL = os.environ.get('VLLM_URL', 'http://localhost:8001/v1')
+VLLM_MODEL = os.environ.get('VLLM_MODEL', '')
 
 REST_FRAMEWORK = {
     # Local, single-user tool: no login. Add authentication before sharing it on a network.

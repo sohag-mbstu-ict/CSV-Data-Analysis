@@ -17,6 +17,86 @@ FORBIDDEN = re.compile(
 )
 
 
+QUOTED = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"")
+# A CTE definition: `WITH name AS (` or `, name AS (`, optionally with a column list.
+CTE_DEFINITION = re.compile(
+    r"(?:\bwith\s+(?:recursive\s+)?|,\s*)"
+    r"(\"_*\"|[A-Za-z_]\w*)\s*(?:\([^()]*\)\s*)?as\s*(?:(?:not\s+)?materialized\s*)?\(",
+    re.I,
+)
+INCOMPLETE_CTE = (
+    "Incomplete query: it defines a WITH block but has no final SELECT after it. "
+    "Add a SELECT that reads from the CTE after its closing parenthesis, "
+    "or write a plain SELECT without WITH."
+)
+
+
+def _mask_quotes(sql):
+    """Blank out quoted strings and identifiers, keeping every character position."""
+    return QUOTED.sub(lambda m: m.group(0)[0] + "_" * (len(m.group(0)) - 2) + m.group(0)[-1], sql)
+
+
+def _strip_end(sql):
+    return sql.rstrip().rstrip(";").rstrip()
+
+
+def _top_level_text(masked):
+    """Return only the characters outside any parentheses."""
+    depth, kept = 0, []
+    for char in masked:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif depth == 0:
+            kept.append(char)
+    return "".join(kept)
+
+
+def _has_final_select(masked):
+    """A WITH query must have a SELECT outside the CTE bodies."""
+    if not re.match(r"\s*with\b", masked, re.I):
+        return True
+    return bool(re.search(r"\bselect\b", _top_level_text(masked), re.I))
+
+
+def dangling_cte_name(sql):
+    """Return the last CTE's name if the query ends right after its WITH block, else None."""
+    sql = _strip_end(sql)
+    masked = _mask_quotes(sql)
+    if _has_final_select(masked):
+        return None
+    last = None
+    for match in CTE_DEFINITION.finditer(masked):
+        before = masked[:match.start()]
+        if before.count("(") == before.count(")"):
+            last = match
+    if last is None:
+        return None
+    # The last CTE body must run to the very end of the query.
+    depth = 0
+    for index in range(last.end() - 1, len(masked)):
+        if masked[index] == "(":
+            depth += 1
+        elif masked[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return sql[last.start(1):last.end(1)] if index == len(masked) - 1 else None
+    return None
+
+
+def complete_dangling_cte(sql):
+    """Add `SELECT * FROM <last cte>` to a query that stops after its WITH block.
+
+    Small models sometimes write a correct CTE and then stop. Returns (sql, cte_name);
+    cte_name is None when the query was left unchanged.
+    """
+    name = dangling_cte_name(sql)
+    if name is None:
+        return sql, None
+    return f"{_strip_end(sql)}\nSELECT * FROM {name}", name
+
+
 def check_sql(sql):
     """Allow one read-only SELECT; DuckDB's sandbox is a second safety layer."""
     code = re.sub(r"'(?:[^']|'')*'", "''", sql)
@@ -27,6 +107,8 @@ def check_sql(sql):
     bad = FORBIDDEN.search(code)
     if bad:
         raise ValueError(f"Forbidden SQL: {bad.group(0)}")
+    if not _has_final_select(_mask_quotes(_strip_end(sql))):
+        raise ValueError(INCOMPLETE_CTE)
 
 
 class Engine:

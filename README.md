@@ -55,12 +55,43 @@ ollama pull qwen3.5:2b      # default model; a larger one such as qwen3.5:4b wri
 ollama serve                # skip this if the Ollama app is already running
 ```
 
+### Optional: vLLM with local model weights
+
+Instead of Ollama, the app can use model weights on disk (`base_model/Qwen3.5-4B`, downloaded with `uv run python download_weight.py`) served by [vLLM](https://docs.vllm.ai) on an NVIDIA GPU. vLLM is an optional extra because it is a multi-GB install:
+
+```bash
+UV_HTTP_TIMEOUT=600 uv sync --extra vllm --inexact
+```
+
+`--inexact` keeps packages that are not in the lockfile, such as the kernels from `vllm download-kernels`. A plain `uv sync` without `--extra vllm` uninstalls vLLM.
+
+Start the server in its own terminal and leave it running:
+
+```bash
+./serve_vllm.sh          # start; ready when it prints "Application startup complete" (~30 s; ~2 min the first time while it compiles)
+./serve_vllm.sh --stop   # stop it and free the GPU
+```
+
+The script stops leftover vLLM processes, unloads any Ollama model from the GPU, checks that port 8001 is free and then runs `vllm serve` with these settings (tested on an 8 GB RTX 3070):
+
+| Flag | Why |
+|---|---|
+| `--port 8001` | Django's runserver uses vLLM's default port 8000 |
+| `--quantization fp8_per_tensor` | The bf16 weights are ~9.3 GB; 8-bit weights take ~4.7 GB |
+| `--language-model-only` | Skips the vision encoder; the app only sends text |
+| `--max-model-len 8192` | Same context length the Ollama backend uses |
+| `--max-num-seqs 4`, `--max-cudagraph-capture-size 4` | Keeps CUDA graphs on (the GPU replays each decoding step instead of Python launching ~1,000 kernels per token: ~72 instead of ~24 tok/s) but records them only for batches up to 4. The default, up to 512, needs ~4 GB more and runs out of memory |
+| `--gpu-memory-utilization 0.85` | Leaves room for the desktop; vLLM refuses to start if less than this share is free |
+
+Override with `VLLM_MODEL_DIR`, `VLLM_PORT` or `VLLM_GPU_UTIL`, for example `VLLM_GPU_UTIL=0.8 ./serve_vllm.sh`.
+
 ## Setup
 
 ```bash
 git clone https://github.com/sohag-mbstu-ict/CSV-Data-Analysis.git
 cd CSV-Data-Analysis
 uv sync                     # creates .venv and installs dependencies from uv.lock
+                            # (add --extra vllm --inexact to also install vLLM)
 uv run python manage.py migrate
 ```
 
@@ -97,10 +128,20 @@ Open <http://127.0.0.1:8000/>, then:
 
 Chats are saved per dataset in SQLite and stay after a reload. The server terminal also prints a full text report for every question.
 
+### Choosing the model backend
+
+| Backend | Web app / API | CLI |
+|---|---|---|
+| Ollama, `qwen3.5:4b` (default) | `uv run python manage.py runserver` | `uv run python utils/ask_csv.py` |
+| vLLM, local weights | `LLM_BACKEND=vllm uv run python manage.py runserver` | `uv run python utils/ask_csv.py --backend vllm` |
+
+The backend is chosen when the server starts; restart runserver to switch. The speed line under each answer shows which backend answered (for example `3 LLM calls via vllm`).
+
 ### CLI tool
 
 ```bash
 uv run python utils/ask_csv.py                       # uses ./data.csv
+uv run python utils/ask_csv.py --backend vllm        # local weights served by vLLM
 uv run python utils/ask_csv.py --csv path/to/file.csv
 uv run python utils/ask_csv.py --model qwen3.5:4b --show-prompts
 ```
@@ -217,7 +258,10 @@ Settings are read from environment variables:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OLLAMA_MODEL` | `qwen3.5:2b` | Model used by the web app and API (the CLI uses `--model`) |
+| `LLM_BACKEND` | `ollama` | `ollama` or `vllm` (the CLI also has `--backend`) |
+| `OLLAMA_MODEL` | `qwen3.5:4b` | Ollama model used by the web app and API (the CLI uses `--model`) |
+| `VLLM_URL` | `http://localhost:8001/v1` | vLLM server address (the CLI uses `--vllm-url`) |
+| `VLLM_MODEL` | *(empty)* | Model name on the vLLM server; empty uses the one the server reports |
 | `CSV_MAX_UPLOAD_MB` | `50` | Largest CSV accepted for upload |
 | `DJANGO_DEBUG` | `1` | `0` turns off debug mode |
 | `DJANGO_SECRET_KEY` | dev placeholder | Set a private value outside local development |

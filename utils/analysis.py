@@ -15,7 +15,7 @@ import pandas as pd
 
 from utils.csv_profile import is_dataset_description_request
 from utils.llm_client import question_to_sql
-from utils.query_engine import check_sql
+from utils.query_engine import check_sql, complete_dangling_cte
 from utils.result_grounding import write_answer
 from utils.visualization import save_bar_chart, wants_bar_chart
 
@@ -348,8 +348,10 @@ def analyze(question, llm, engine, profile_text, missing, duplicates, chart_dir=
         # Valid reply but no query: the message is not a question about the data
         # (e.g. "ok then"). Retrying as a "repair" only wastes model calls.
         return finish(_clarify_reply(question, engine))
+    completed_cte = None
     for attempt in range(MAX_REPAIRS + 1):
         if sql:
+            sql, completed_cte = complete_dangling_cte(sql)
             try:
                 check_sql(sql)
                 frame, truncated = engine.run(sql)
@@ -396,6 +398,11 @@ def analyze(question, llm, engine, profile_text, missing, duplicates, chart_dir=
         warnings.append("Result truncated to 200 rows.")
 
     notes = []
+    if completed_cte:
+        notes.append(
+            f"The generated query stopped after its WITH block, so \"SELECT * FROM {completed_cte}\" "
+            "was added to return that block's result. The SQL shown includes this addition."
+        )
     if share_context:
         notes.append(
             "The share percentage was independently recalculated using the full dataset total; "
